@@ -18,6 +18,7 @@ import fxt_getcalf
 
 import pyximport
 pyximport.install()
+
 import paint_rects
 
 import forkqueue
@@ -132,7 +133,7 @@ class TelDef:
 class BadPix:
     """Bad pixel mask from event file."""
 
-    def __init__(self, evt_fname):
+    def __init__(self, evt_fname, edgecovermask):
         self.mask = np.ones((384, 384), dtype=np.int32)
 
         # remove edges
@@ -177,8 +178,11 @@ class BadPix:
             self.mask[0:128,:] = 0
             self.mask[256:,:] = 0
 
+        if edgecovermask:
+            self.mask[:20,:] = 0
+
 class Vignetting:
-    def __init__(self, evt_fname, teldef, energy_keV):
+    def __init__(self, evt_fname, teldef, energy_keV, flatvign=False):
         """Get vignetting map."""
 
         logger.info("calculating vignetting rate map")
@@ -216,6 +220,9 @@ class Vignetting:
         vignrate = vignrateflatten.reshape(384,384)
         vignrate[vignrate>1] = 1
         vignrate[vignrate<0] = 0
+        if flatvign:
+            vignrate[:,:] = 1
+
         self.vign = vignrate.T # note transpose!
 
     def vignfunc(self, x,c0,beta):
@@ -336,7 +343,7 @@ def chunk_range(n, nchunk):
 
 def main_expmap(args, teldef, att, gti, badpix, wcs):
 
-    vign = Vignetting(args.events, teldef, args.energy)
+    vign = Vignetting(args.events, teldef, args.energy, flatvign=args.novignetting)
 
     size_e = (teldef.det['ysiz']+1,teldef.det['xsiz']+1)
     row_e, col_e = np.indices(size_e)+0.5
@@ -470,6 +477,8 @@ def main():
     parser.add_argument('--writeevt', help='output filtered event file with new coordinates (for image)')
     parser.add_argument('--energy', type=float, help='energy (for expmap)', default=1.0)
     parser.add_argument('--tstep', type=float, help='time step (for expmap)', default=5.0)
+    parser.add_argument('--edgecovermask', help='remove masked pixels at edge', action='store_true')
+    parser.add_argument('--novignetting', help='use flat vignetting', action='store_true')
 
     parser.add_argument('mode', choices=('image', 'expmap'), help='program mode to use')
     parser.add_argument('events', help='input event file')
@@ -485,7 +494,7 @@ def main():
     logger.info('Reading GTIs')
     gti = GTI(args.events)
     logger.info('Reading bad pixels')
-    badpix = BadPix(args.events)
+    badpix = BadPix(args.events, args.edgecovermask)
 
     wcs = ImgWCS(args.ra, args.dec, npix=args.npix, pixsize_as=args.pixsize)
 
