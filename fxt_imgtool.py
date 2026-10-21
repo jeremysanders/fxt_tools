@@ -346,7 +346,7 @@ def main_expmap(args, teldef, att, gti, badpix, wcs):
     vign = Vignetting(args.events, teldef, args.energy, flatvign=args.novignetting)
 
     size_e = (teldef.det['ysiz']+1,teldef.det['xsiz']+1)
-    row_e, col_e = np.indices(size_e)+0.5
+    row_e, col_e = np.indices(size_e)-0.5 # starts at 0
     row_er = np.ravel(row_e)
     col_er = np.ravel(col_e)
 
@@ -416,7 +416,8 @@ def main_image(args, teldef, att, gti, badpix, wcs):
         out_ra = []
         out_dec = []
         for j in range(i*chunksize, min(num, (i+1)*chunksize)):
-            ra, dec = att.det2RaDec(time_m[j], ccdy_m[j:j+1], ccdx_m[j:j+1])
+            # below are subtracted 1, as the routine times 0-based ccd indices
+            ra, dec = att.det2RaDec(time_m[j], ccdy_m[j:j+1]-1, ccdx_m[j:j+1]-1)
             out_ra.append(ra[0])
             out_dec.append(dec[0])
         return np.array(out_ra), np.array(out_dec)
