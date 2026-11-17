@@ -12,9 +12,16 @@ import astropy.wcs
 import tqdm
 import scipy.interpolate
 
-import get_vign
-import attitude
-import fxt_getcalf
+try:
+    # fxtsoft >= v2.0
+    from caldb_tools.shared.caldb import get_vign
+    from caldb_tools.shared.caldb import fxt_getcalf
+    from caldb_tools.shared.calibration import attitude
+except ImportError:
+    # fxtsoft < v2.0
+    import get_vign
+    import fxt_getcalf
+    import attitude
 
 import pyximport
 pyximport.install()
@@ -35,9 +42,11 @@ def setup_logging():
 
 class TelDef:
     def __init__(self, evtfname):
-        datapathfile, dataxno = self.get_teldef(evtfname)
-        CALDBpath = os.getenv('CALDB')
-        filename = CALDBpath + "/" + datapathfile
+        filename, dataxno = self.get_teldef(evtfname)
+        if filename[:1] != '/':
+            # fxtsoft < v2.0
+            CALDBpath = os.getenv('CALDB')
+            filename = CALDBpath + "/" + filename
 
         header = fits.getheader(filename)
 
