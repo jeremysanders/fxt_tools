@@ -198,11 +198,15 @@ class Vignetting:
         idxfile, xno = get_vign.get_vign(evt_fname)
         logger.debug("{idxfile,xno}")
         vignpar = get_vign.get_vignpar(idxfile, xno)
-        e0 = vignpar["ENERGY"]
-        p0 = vignpar["COEF0"]
-        p1 = vignpar["COEF1"]
-        #p2 = vignpar["COEF2"][0]
-        #logger.debug(p0,p1,p2)
+        e0 = vignpar["ENERGY"].astype(np.float64)
+        p0 = vignpar["COEF0"].astype(np.float64)
+        p1 = vignpar["COEF1"].astype(np.float64)
+        try:
+            alpha = vignpar["ALPHA"].astype(np.float64)
+        except KeyError:
+            # compatibility caldb < 1.3
+            alpha = np.full(p0.shape, 2.0)
+
         detimage = np.ones((384,384))
         detidx = np.argwhere(detimage>-11)
         det_center = [teldef.optaxis["x"]-1, teldef.optaxis["y"]-1]
@@ -215,7 +219,7 @@ class Vignetting:
             vignratelist = []
             vignnum = 0
             for ij in range(p0.shape[0]):
-                vignratetemp = self.vignfunc(te, p0[ij], p1[ij])
+                vignratetemp = self.vignfunc(te, p0[ij], p1[ij], alpha[ij])
                 vignratelist.append(vignratetemp)
                 vignnum =vignnum+1
             if vignnum == 2:
@@ -234,8 +238,8 @@ class Vignetting:
 
         self.vign = vignrate.T # note transpose!
 
-    def vignfunc(self, x,c0,beta):
-        return ((1+(x/c0)**2)**(-beta))
+    def vignfunc(self, x, c0, beta, alpha):
+        return ((1+(x/c0)**alpha)**(-beta))
 
 class Attitude:
     def __init__(self, atfname, teldef, evtfname, corrfname=None):
@@ -325,7 +329,7 @@ class GTI:
             tsteps = (np.arange(hi-lo+1) + lo)*tstep
             out.append(tsteps)
         out = np.concatenate(out)
-        return out 
+        return out
 
 class ImgWCS:
     def __init__(self, ra0, dec0, pixsize_as=2.5, npix=2048, proj='SIN'):
