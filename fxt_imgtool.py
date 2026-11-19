@@ -210,25 +210,17 @@ class Vignetting:
         detimage = np.ones((384,384))
         detidx = np.argwhere(detimage>-11)
         det_center = [teldef.optaxis["x"]-1, teldef.optaxis["y"]-1]
-        ralist  = ((detidx[:,1]-det_center[1]+1)**2+(detidx[:,0]-det_center[0]+1)**2)**0.5
+        ralist  = np.sqrt((detidx[:,1]-det_center[1])**2 + (detidx[:,0]-det_center[0])**2)
         ramatrix = ralist.reshape(384,384)
         theta = ramatrix * teldef.imxscl * 60.
         thetaline = theta.flatten()
         vignrateflatten = np.zeros(len(thetaline))
         for i, te in enumerate(thetaline):
             vignratelist = []
-            vignnum = 0
             for ij in range(p0.shape[0]):
                 vignratetemp = self.vignfunc(te, p0[ij], p1[ij], alpha[ij])
                 vignratelist.append(vignratetemp)
-                vignnum =vignnum+1
-            if vignnum == 2:
-                funcinter = scipy.interpolate.UnivariateSpline(
-                    e0,np.array(vignratelist),k=1,s=0) #s = 0 : go through all the data point, s>0
-            else:
-                funcinter = scipy.interpolate.UnivariateSpline(
-                    e0,np.array(vignratelist),k=2,s=0) #s = 0 : go through all the data point, s>0
-            vignrateflatten[i] = funcinter(energy_keV)
+            vignrateflatten[i] = np.interp(energy_keV, e0, np.array(vignratelist))
 
         vignrate = vignrateflatten.reshape(384,384)
         vignrate[vignrate>1] = 1
