@@ -10,7 +10,6 @@ import numpy as np
 from astropy.io import fits
 import astropy.wcs
 import tqdm
-import scipy.interpolate
 
 try:
     # fxtsoft >= v2.0

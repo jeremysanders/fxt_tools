@@ -62,7 +62,7 @@ cdef inline double poly_area(const double* x, const double* y, int n) noexcept n
     return fabs(0.5 * a)
 
 
-def paint_rects(double[:,::1] qye, double[:,::1] qxe, double[:,::1] qva, double[:,::1] oimg):
+def paint_rects(const double[:,::1] qye, const double[:,::1] qxe, const double[:,::1] qva, double[:,::1] oimg):
     """qye = yedges, qxe = xedges, qva = values, oimg = output image."""
 
     cdef int oyw = oimg.shape[0]

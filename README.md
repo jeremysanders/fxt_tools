@@ -4,7 +4,7 @@
 
 A tool for making images and exposure maps for Einstein Probe FXT data
 
-Prerequisites:  Python 3, FXTSoft, forkqueue, cython, scipy, astropy, tqdm
+Prerequisites:  Python 3, FXTSoft, forkqueue, cython, astropy, tqdm
 
 Usage:
 
