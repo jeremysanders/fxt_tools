@@ -1,221 +1,167 @@
 # cython: language_level=3
+# cython: boundscheck=False, wraparound=False, cdivision=True, initializedcheck=False
 
 # paint rectangles (for exposure map)
+#
+# Each input quad (a warped input pixel) is distributed over the output pixels
+# it overlaps, weighted by overlap area.
+#
+# Speedups vs. the generic Sutherland-Hodgman version:
+#  * output pixels are axis-aligned, so clipping is done with four axis-aligned
+#    half-plane clips (no slopes, no division by (x2-x1), no cross products)
+#  * the quad is clipped to a column slab once per output column, then each
+#    row only needs a clip of that (small) slab polygon
+#  * row range is tightened per column to the slab polygon's y-extent
+#  * tighter bounding-box loop limits (no zero-area border pixels)
+#  * no struct-by-value copying; everything on stack arrays, runs without the GIL
+#  * fast path when a quad lies entirely inside one output pixel
+#  * quads with value 0 are skipped
 
-import cython
 import numpy as np
-from libc.math cimport floor, ceil, fabs
+from libc.math cimport floor, fabs
 
-cdef struct Poly:
-    int num
-    double[8][2] pts
+DEF MAXV = 16
 
-# clip double
-cdef double clip_d(double v, double minv, double maxv) noexcept:
-    return min(max(v, minv), maxv)
+# Clip polygon (ia, ib) of n points against the half-plane
+#   sgn * (a - bound) >= 0
+# where a is the "clipping" coordinate array and b the other one.
+# Output goes to (oa, ob); returns the new vertex count.
+cdef inline int clip_axis(const double* ia, const double* ib, int n,
+                          double* oa, double* ob,
+                          double bound, double sgn) noexcept nogil:
+    cdef int i, m = 0
+    cdef double pa, pb, ca, cb, dp, dc, t
+    pa = ia[n-1]
+    pb = ib[n-1]
+    dp = sgn * (pa - bound)
+    for i in range(n):
+        ca = ia[i]
+        cb = ib[i]
+        dc = sgn * (ca - bound)
+        if (dc >= 0) != (dp >= 0):
+            t = dp / (dp - dc)
+            oa[m] = bound
+            ob[m] = pb + t * (cb - pb)
+            m += 1
+        if dc >= 0:
+            oa[m] = ca
+            ob[m] = cb
+            m += 1
+        pa = ca
+        pb = cb
+        dp = dc
+    return m
 
-# clip integer
-cdef int clip_i(int v, int minv, int maxv) noexcept:
-    return min(max(v, minv), maxv)
-
-# whether inside or outside shape
-cdef int is_inside(double[2] p1, double[2] p2, double[2] q) noexcept:
-    cdef double R = (p2[0]-p1[0])*(q[1]-p1[1]) - (p2[1]-p1[1])*(q[0]-p1[0])
-    if R <= 0:
-        return 1
-    return 0
-
-@cython.cdivision(True)
-cdef void compute_intersection(double[2] p1, double[2] p2,
-                               double[2] p3, double[2] p4,
-                               double[2] o):
-    cdef double x, m1, b1, y, m2, b2
-    if p2[0]-p1[0] == 0:
-        x = p1[0]
-        m2 = (p4[1]-p3[1])/(p4[0]-p3[0])
-        b2 = p3[1] - m2*p3[0]
-        y = m2*x + b2
-    elif p4[0]-p3[0] == 0:
-        x = p3[0]
-        m1 = (p2[1]-p1[1])/(p2[0]-p1[0])
-        b1 = p1[1] - m1*p1[0]
-        y = m1*x + b1
-    else:
-        m1 = (p2[1]-p1[1]) / (p2[0]-p1[0])
-        b1 = p1[1] - m1*p1[0]
-        m2 = (p4[1]-p3[1]) / (p4[0]-p3[0])
-        b2 = p3[1] - m2*p3[0]
-        x = (b2-b1) / (m1-m2)
-        y = m1*x + b1
-    o[0] = x
-    o[1] = y
-
-# cdef void doprint(Poly poly):
-#     out = []
-#     for i in range(poly.num):
-#         out.append('[%.4f %.4f]' % (poly.pts[i][0], poly.pts[i][1]))
-#     print(' '.join(out))
-
-# Sutherland–Hodgman Algorithm
-# see https://github.com/mhdadk/sutherland-hodgman/blob/main/SH.py
-# points need to be in correct order (anticlockwise?) or overlap is zero
-cdef Poly poly_clip(Poly spoly, Poly cpoly) noexcept:
-
-    cdef Poly npoly, opoly
-    opoly = spoly
-
-    cdef double[2] cedge1, cedge2, sedge1, sedge2, inter
-
-    cdef int i, j
-    for i in range(cpoly.num):
-        npoly = opoly
-        opoly.num = 0
-       
-        if i==0:
-            cedge1 = cpoly.pts[cpoly.num-1]
-        else:
-            cedge1 = cpoly.pts[i-1]
-        cedge2 = cpoly.pts[i]
-
-        for j in range(npoly.num):
-            if j==0:
-                sedge1 = npoly.pts[npoly.num-1]
-            else:
-                sedge1 = npoly.pts[j-1]
-            sedge2 = npoly.pts[j]
-            if is_inside(cedge1, cedge2, sedge2):
-                if not is_inside(cedge1, cedge2, sedge1):
-                    compute_intersection(sedge1, sedge2, cedge1, cedge2, inter)
-                    opoly.pts[opoly.num] = inter
-                    opoly.num += 1
-                opoly.pts[opoly.num] = sedge2
-                opoly.num += 1
-            elif is_inside(cedge1, cedge2, sedge1):
-                compute_intersection(sedge1, sedge2, cedge1, cedge2, inter)
-                opoly.pts[opoly.num] = inter
-                opoly.num += 1
-
-    return opoly
-
-# polygon area - maybe issue with sign
-cdef double poly_area(Poly p) noexcept:
-    cdef int i, j
-    cdef double a
-
-    a = 0.
-    j = p.num-1
-    for i in range(p.num):
-        a += (p.pts[j][0]+p.pts[i][0]) * (p.pts[j][1]-p.pts[i][1])
+# absolute polygon area (shoelace)
+cdef inline double poly_area(const double* x, const double* y, int n) noexcept nogil:
+    cdef int i, j = n - 1
+    cdef double a = 0.
+    for i in range(n):
+        a += (x[j] + x[i]) * (y[j] - y[i])
         j = i
-    return 0.5*a
+    return fabs(0.5 * a)
 
-# python test function for clipping
-def test_clip(double[:,:] spoly, double[:,:] cpoly):
-    cdef Poly _spoly, _cpoly
-    cdef int i, onum
 
-    assert spoly.shape[1] == 2
-    assert cpoly.shape[1] == 2
-
-    _spoly.num = spoly.shape[0]
-    for i in range(spoly.shape[0]):
-        _spoly.pts[i][0] = spoly[i,0]
-        _spoly.pts[i][1] = spoly[i,1]
-    _cpoly.num = cpoly.shape[0]
-    for i in range(cpoly.shape[0]):
-        _cpoly.pts[i][0] = cpoly[i,0]
-        _cpoly.pts[i][1] = cpoly[i,1]
-
-    #onum = clip(_spoly, _cpoly, _opoly)
-    #onum = test_foo(_opoly)
-
-    cdef Poly outp
-    outp = poly_clip(_spoly, _cpoly)
-
-    out = np.zeros((outp.num,2))
-    for i in range(outp.num):
-        out[i,0] = outp.pts[i][0]
-        out[i,1] = outp.pts[i][1]
-    return out
-
-@cython.wraparound(False)
-@cython.cdivision(True)
-@cython.boundscheck(False)
 def paint_rects(double[:,::1] qye, double[:,::1] qxe, double[:,::1] qva, double[:,::1] oimg):
     """qye = yedges, qxe = xedges, qva = values, oimg = output image."""
 
     cdef int oyw = oimg.shape[0]
     cdef int oxw = oimg.shape[1]
-
     cdef int qyw = qva.shape[0]
     cdef int qxw = qva.shape[1]
 
-    assert qye.shape[0]==qyw+1 and qye.shape[1]==qxw+1
-    assert qxe.shape[0]==qyw+1 and qxe.shape[1]==qxw+1
+    assert qye.shape[0] == qyw+1 and qye.shape[1] == qxw+1
+    assert qxe.shape[0] == qyw+1 and qxe.shape[1] == qxw+1
 
-    cdef int y, x, oy, ox
-    cdef double v, a
-    # coordinates of input pixel
-    cdef double x1, x2, x3, x4, y1, y2, y3, y4
-    # coordinates of output pixel
-    cdef double xp1, xp2, xp3, xp4, yp1, yp2, yp3, yp4
-    # range to iterate over in output
-    cdef int xmin, xmax, ymin, ymax
+    cdef int y, x, oy, ox, n, n1, n2, n3, n4
+    cdef int xlo, xhi, ylo, yhi, oylo, oyhi
+    cdef double v, minx, maxx, miny, maxy, sminy, smaxy, fx, fy
 
-    cdef Poly polyin, polypix, polyclip
-    cdef double aclip
+    # polygon buffers: quad, and ping-pong buffers for x/y coordinates
+    cdef double qx[MAXV]
+    cdef double qy[MAXV]
+    cdef double sx[MAXV]   # slab polygon (after x clipping)
+    cdef double sy[MAXV]
+    cdef double tx[MAXV]
+    cdef double ty[MAXV]
+    cdef double ux[MAXV]
+    cdef double uy[MAXV]
 
-    polyin.num = 4
-    polypix.num = 4
+    with nogil:
+        for y in range(qyw):
+            for x in range(qxw):
+                v = qva[y, x]
+                if v == 0:
+                    continue
 
-    for y in range(qyw):
-        for x in range(qxw):
-            x1 = qxe[y,   x  ]
-            y1 = qye[y,   x  ]
-            x2 = qxe[y+1, x  ]
-            y2 = qye[y+1, x  ]
-            x3 = qxe[y+1, x+1]
-            y3 = qye[y+1, x+1]
-            x4 = qxe[y,   x+1]
-            y4 = qye[y,   x+1]
-            v  = qva[y,   x  ]
+                qx[0] = qxe[y,   x  ]
+                qy[0] = qye[y,   x  ]
+                qx[1] = qxe[y+1, x  ]
+                qy[1] = qye[y+1, x  ]
+                qx[2] = qxe[y+1, x+1]
+                qy[2] = qye[y+1, x+1]
+                qx[3] = qxe[y,   x+1]
+                qy[3] = qye[y,   x+1]
 
-            xmin = int(clip_d(floor(min(x1, x2, x3, x4)), -1, oxw))
-            ymin = int(clip_d(floor(min(y1, y2, y3, y4)), -1, oyw))
-            xmax = int(clip_d( ceil(max(x1, x2, x3, x4)), -1, oxw))
-            ymax = int(clip_d( ceil(max(y1, y2, y3, y4)), -1, oyw))
+                minx = min(min(qx[0], qx[1]), min(qx[2], qx[3]))
+                maxx = max(max(qx[0], qx[1]), max(qx[2], qx[3]))
+                miny = min(min(qy[0], qy[1]), min(qy[2], qy[3]))
+                maxy = max(max(qy[0], qy[1]), max(qy[2], qy[3]))
 
-            # out of bounds
-            if ( (xmin==-1 and xmax==-1) or (xmin==oxw and xmax==oxw) or
-                 (ymin==-1 and ymax==-1) or (ymin==oyw and ymax==oyw)):
-                continue
+                # output pixel i covers [i-0.5, i+0.5]; skip quads fully outside
+                # (also rejects NaN, since comparisons with NaN are false)
+                if not (maxx >= -0.5 and minx <= oxw - 0.5 and
+                        maxy >= -0.5 and miny <= oyw - 0.5):
+                    continue
 
-            polyin.pts[0][0] = x1
-            polyin.pts[0][1] = y1
-            polyin.pts[1][0] = x2
-            polyin.pts[1][1] = y2
-            polyin.pts[2][0] = x3
-            polyin.pts[2][1] = y3
-            polyin.pts[3][0] = x4
-            polyin.pts[3][1] = y4
+                # range of output pixels touched (as doubles first: avoids int overflow)
+                fx = floor(minx + 0.5)
+                xlo = <int>(fx if fx > 0 else 0)
+                fx = floor(maxx + 0.5)
+                xhi = <int>(fx if fx < oxw - 1 else oxw - 1)
+                fy = floor(miny + 0.5)
+                ylo = <int>(fy if fy > 0 else 0)
+                fy = floor(maxy + 0.5)
+                yhi = <int>(fy if fy < oyw - 1 else oyw - 1)
 
-            xmin = clip_i(xmin, 0, oxw-1)
-            ymin = clip_i(ymin, 0, oyw-1)
-            xmax = clip_i(xmax, 0, oxw-1)
-            ymax = clip_i(ymax, 0, oyw-1)
+                if xlo > xhi or ylo > yhi:
+                    continue
 
-            # iterate over overlapping output pixels with input pixel
-            for oy in range(ymin, ymax+1):
-                for ox in range(xmin, xmax+1):
-                    polypix.pts[0][0] = ox - 0.5
-                    polypix.pts[0][1] = oy - 0.5
-                    polypix.pts[1][0] = ox - 0.5
-                    polypix.pts[1][1] = oy + 0.5
-                    polypix.pts[2][0] = ox + 0.5
-                    polypix.pts[2][1] = oy + 0.5
-                    polypix.pts[3][0] = ox + 0.5
-                    polypix.pts[3][1] = oy - 0.5
+                # fast path: quad entirely inside a single output pixel
+                if (xlo == xhi and ylo == yhi and
+                        minx >= xlo - 0.5 and maxx <= xlo + 0.5 and
+                        miny >= ylo - 0.5 and maxy <= ylo + 0.5):
+                    oimg[ylo, xlo] += poly_area(qx, qy, 4) * v
+                    continue
 
-                    polyclip = poly_clip(polyin, polypix)
-                    aclip = fabs(poly_area(polyclip))  # would be 1 for complete overlap
-                    oimg[oy, ox] += aclip * v
+                for ox in range(xlo, xhi + 1):
+                    # clip to column slab ox-0.5 <= x <= ox+0.5
+                    n1 = clip_axis(qx, qy, 4, tx, ty, ox - 0.5, 1.0)
+                    if n1 < 3:
+                        continue
+                    n = clip_axis(tx, ty, n1, sx, sy, ox + 0.5, -1.0)
+                    if n < 3:
+                        continue
+
+                    # y-extent of the slab polygon limits the rows to visit
+                    sminy = sy[0]
+                    smaxy = sy[0]
+                    for n2 in range(1, n):
+                        if sy[n2] < sminy:
+                            sminy = sy[n2]
+                        if sy[n2] > smaxy:
+                            smaxy = sy[n2]
+                    fy = floor(sminy + 0.5)
+                    oylo = <int>(fy if fy > ylo else ylo)
+                    fy = floor(smaxy + 0.5)
+                    oyhi = <int>(fy if fy < yhi else yhi)
+
+                    for oy in range(oylo, oyhi + 1):
+                        # clip to row oy-0.5 <= y <= oy+0.5 (clipping coord is y)
+                        n3 = clip_axis(sy, sx, n, ty, tx, oy - 0.5, 1.0)
+                        if n3 < 3:
+                            continue
+                        n4 = clip_axis(ty, tx, n3, uy, ux, oy + 0.5, -1.0)
+                        if n4 < 3:
+                            continue
+                        oimg[oy, ox] += poly_area(ux, uy, n4) * v
